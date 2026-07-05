@@ -1,12 +1,20 @@
 [package]
-name = "infernal"
+name = "infernox-infernal"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "infernox: a Rust reimplementation of Infernal — byte-parity covariance-model search (cmsearch), core library and tools."
 autobins = false
 
+[lib]
+name = "infernal"
+
 [dependencies]
-easel = { path = "../easel" }
-hmmer = { path = "../hmmer" }
+easel = { package = "infernox-easel", version = "0.1.0", path = "../easel" }
+hmmer = { package = "infernox-hmmer", version = "0.1.0", path = "../hmmer" }
 thiserror.workspace = true
 rayon.workspace = true
 clap.workspace = true

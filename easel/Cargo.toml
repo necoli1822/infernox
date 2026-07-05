@@ -1,10 +1,18 @@
 [package]
-name = "easel"
+name = "infernox-easel"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Rust port of the Easel sequence/statistics library — foundation of infernox, a Rust reimplementation of Infernal."
+
+[lib]
+name = "easel"
 
 [dependencies]
 thiserror.workspace = true
 
 [dev-dependencies]
-infernal = { path = "../infernal" }
+infernal = { package = "infernox-infernal", path = "../infernal" }
