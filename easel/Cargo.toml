@@ -1,0 +1,10 @@
+[package]
+name = "easel"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+infernal = { path = "../infernal" }

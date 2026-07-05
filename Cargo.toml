@@ -1,0 +1,27 @@
+[workspace]
+members = ["easel", "hmmer", "infernal"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Sunju Kim <n.e.coli.1822@gmail.com>"]
+license = "BSD-3-Clause"
+repository = "https://github.com/necoli1822/infernox"
+homepage = "https://github.com/necoli1822/infernox"
+
+[workspace.dependencies]
+thiserror = "1.0"
+rayon = "1.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+rand = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "thin"           # Link-time optimization
+codegen-units = 1      # Better optimization (slower compile)
+strip = false          # Keep symbols for profiling
+panic = "abort"        # Smaller binary, faster panic
+overflow-checks = false  # Disable overflow checks in release

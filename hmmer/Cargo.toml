@@ -1,0 +1,8 @@
+[package]
+name = "hmmer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+easel = { path = "../easel" }
+thiserror.workspace = true
