@@ -2,6 +2,18 @@
 
 All notable changes to the `infernox-infernal` crate are documented here.
 
+## [0.1.2] - 2026-07-05
+
+### Removed
+
+- **Development golden-test scaffolding**: dropped the `tests/golden_phase*.rs`
+  integration tests (and the orphaned `tests/data/trna-5.cm`) from the crate.
+  They depended on externally C-generated golden fixtures that were never
+  vendored (one even hardcoded an absolute developer path), so the published
+  package shipped tests that could not pass. The self-contained `src/` unit
+  tests (114) remain and pass; `cargo test` is now clean. No library code
+  changed — the byte-parity fix from 0.1.1 is included unchanged.
+
 ## [0.1.1] - 2026-07-05
 
 ### Fixed
