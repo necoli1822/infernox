@@ -2497,7 +2497,17 @@ pub fn hmm_bands_enforce_valid_parse(
                         n = n.max(cp9b.pn_min_m[kp1]);
                         n = n.min(cp9b.pn_max_m[kp1]);
                         x = x.min(cp9b.pn_max_m[kp1]);
-                        if !local_begins_ends_on && x.min(r_mx[kp1]) - n.max(r_mn[kp1]) < -1 {
+                        // C: if(!local_begins_ends_on && ESL_MIN(x, r_mx[k+1]) - ESL_MAX(n, r_mn[k+1]) < -1)
+                        // (hmmband.c:2513). Unlike the M/D/EL transitions, C does NOT wrap this
+                        // I_k->M_k+1 gap check in `if(r_mn[k+1] != INT_MAX)`. When M_k+1 is still
+                        // unreached, r_mx[k+1]==INT_MIN and r_mn[k+1]==INT_MAX, so the C `int`
+                        // subtraction INT_MIN-INT_MAX overflows and wraps (on x86) to +1, which is
+                        // >= -1, so the gap is not filled. Faithfully reproduce that wraparound with
+                        // wrapping_sub (plain `-` panics in Rust on this overflow); for every
+                        // reachable case the operands are small residue coords and it equals `-`.
+                        if !local_begins_ends_on
+                            && x.min(r_mx[kp1]).wrapping_sub(n.max(r_mn[kp1])) < -1
+                        {
                             hmm_bands_fill_gap(cp9b, ku, n, x, r_mn[kp1], r_mx[kp1], r_mn[ku - 1], r_dn[ku - 1]);
                             just_filled_gap = true;
                         }

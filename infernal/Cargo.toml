@@ -1,6 +1,8 @@
 [package]
 name = "infernox-infernal"
-version.workspace = true
+# Decoupled from the workspace 0.1.0 (easel/hmmer stay 0.1.0); only infernal
+# carries the cp9_faithful I_k->M_k+1 gap-check overflow fix (see CHANGELOG).
+version = "0.1.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
