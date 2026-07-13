@@ -1,27 +1,72 @@
-[workspace]
-members = ["easel", "hmmer", "infernal"]
-resolver = "2"
-
-[workspace.package]
-version = "0.1.0"
+[package]
+name = "infernox"
+version = "0.1.2"
 edition = "2021"
 authors = ["Sunju Kim <n.e.coli.1822@gmail.com>"]
 license = "BSD-3-Clause"
+description = "infernox: a Rust reimplementation of Infernal — byte-parity covariance-model search (cmsearch) and the full cm* tool suite."
 repository = "https://github.com/necoli1822/infernox"
 homepage = "https://github.com/necoli1822/infernox"
+readme = "README.md"
+keywords = ["bioinformatics", "rna", "infernal", "cmsearch", "covariance-model"]
+categories = ["science", "command-line-utilities"]
+autobins = false
 
-[workspace.dependencies]
+[lib]
+name = "infernox"
+path = "src/lib.rs"
+
+[dependencies]
 thiserror = "1.0"
+# Transparent gzip (.gz) sequence input, matching C esl_sqio's gzip -dc support.
+# Default backend is miniz_oxide (pure Rust) — no system zlib / C toolchain needed.
+flate2 = "1.0"
 rayon = "1.8"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-clap = { version = "4.4", features = ["derive"] }
-rand = "0.8"
+
+[[bin]]
+name = "infernox-cmsearch"
+path = "src/bin/cmsearch.rs"
+
+[[bin]]
+name = "infernox-cmbuild"
+path = "src/bin/cmbuild.rs"
+
+[[bin]]
+name = "infernox-cmcalibrate"
+path = "src/bin/cmcalibrate.rs"
+
+[[bin]]
+name = "infernox-cmalign"
+path = "src/bin/cmalign.rs"
+
+[[bin]]
+name = "infernox-cmscan"
+path = "src/bin/cmscan.rs"
+
+[[bin]]
+name = "infernox-cmpress"
+path = "src/bin/cmpress.rs"
+
+[[bin]]
+name = "infernox-cmfetch"
+path = "src/bin/cmfetch.rs"
+
+[[bin]]
+name = "infernox-cmemit"
+path = "src/bin/cmemit.rs"
+
+[[bin]]
+name = "infernox-cmstat"
+path = "src/bin/cmstat.rs"
+
+[[bin]]
+name = "infernox-cmconvert"
+path = "src/bin/cmconvert.rs"
 
 [profile.release]
 opt-level = 3
-lto = "thin"           # Link-time optimization
-codegen-units = 1      # Better optimization (slower compile)
-strip = false          # Keep symbols for profiling
-panic = "abort"        # Smaller binary, faster panic
+lto = "thin"             # Link-time optimization
+codegen-units = 1        # Better optimization (slower compile)
+strip = false            # Keep symbols for profiling
+panic = "abort"          # Smaller binary, faster panic
 overflow-checks = false  # Disable overflow checks in release

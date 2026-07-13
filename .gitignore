@@ -1,7 +1,6 @@
 target/
 
 # Tooling / editor / OS junk
-.omc/
 .DS_Store
 *.swp
 perf.data
