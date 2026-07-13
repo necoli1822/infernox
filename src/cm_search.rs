@@ -1622,7 +1622,7 @@ impl FaithfulSearcher {
         // SAME CM pipeline (proper alidisplay), in LOCAL (default) or GLOBAL (`-g`)
         // config. Excludes the -g-only --max/--nohmm/--mid modes (those have their own
         // paths). Covers both `--notrunc` and `-g --notrunc`.
-        let do_notrunc_cm = cfg.notrunc && !nohmm && !do_max && !do_mid;
+        let do_notrunc_cm = cfg.notrunc && !nohmm && !do_max; // NOT !do_mid: -g --mid --notrunc must take the notrunc-CM STD path (C runs STD pass, MSV/Vit off), else it falls to the default pipeline and under-scores (clips terminal model positions)
         // C cm_pipeline.c:318-374 truncation-mode selection (same if/else precedence:
         // any > int > only > notrunc > 5trunc > 3trunc > default). --anytrunc/--inttrunc/
         // --onlytrunc add the internal PLI_PASS_5P_AND_3P_ANY pass, which uses the LOCAL
