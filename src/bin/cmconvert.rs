@@ -89,7 +89,6 @@ fn main() {
         .unwrap_or("infernox-cmconvert");
 
     let mut outfile: Option<String> = None;
-    let mut cmfile: Option<String> = None;
     let mut ascii = true; // -a is the default
     let mut binary = false; // -b
     let mut fhmm = false; // --fhmm (write the filter p7 HMM in HMMER3/f format)
@@ -175,8 +174,7 @@ fn main() {
     if positionals.len() != 1 {
         cmdline_fail("Incorrect number of command line arguments.");
     }
-    cmfile = Some(positionals.into_iter().next().unwrap());
-    let cmfile = cmfile.unwrap();
+    let cmfile = positionals.into_iter().next().unwrap();
 
     // Read the whole input, then split it into per-model chunks. Each model in an
     // Infernal 1.1 file begins with an `INFERNAL1/a` banner and ends after its

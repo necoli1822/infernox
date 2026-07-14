@@ -690,6 +690,8 @@ fn main() {
     let maxtau = parsed.get_f64("--maxtau").unwrap_or_else(|e| usage_error(&e));
     // C `--FZ <x>`: use <x> Mb for filter-threshold tier selection.
     let fz = parsed.get_f64("--FZ").unwrap_or_else(|e| usage_error(&e));
+    // C `--Fmid <x>`: with --mid, the shared HMM-stage P-value threshold (default 0.02).
+    let fmid = parsed.get_f64("--Fmid").unwrap_or_else(|e| usage_error(&e));
     // C `--rt1/--rt2/--rt3/--ns`: glocal domain/envelope-definition params.
     let rt1 = parsed.get_f64("--rt1").unwrap_or_else(|e| usage_error(&e));
     let rt2 = parsed.get_f64("--rt2").unwrap_or_else(|e| usage_error(&e));
@@ -716,7 +718,7 @@ fn main() {
         no_f4b: parsed.is_set("--noF4b"), do_f1b: parsed.is_set("--doF1b"),
         do_f5b: parsed.is_set("--doF5b"),
         f6, cykenvx, no_f6, nocykenv,
-        tau, ftau, maxtau, fz,
+        tau, ftau, maxtau, fz, fmid,
         rt1, rt2, rt3, ns,
         hmmonly: parsed.is_set("--hmmonly"),
         nohmmonly: parsed.is_set("--nohmmonly"),

@@ -312,6 +312,9 @@ pub struct FaithfulConfig {
     /// byte-faithful. The MSV-bias (F1b, `do_msvbias`) stage is still not ported, but
     /// no default tier or `--rfam` enables it (only the expert `--F1b`/`--doF1b` flags).
     pub fz: Option<f64>,
+    /// C `--Fmid <x>` (cmsearch.c:141, default 0.02): with `--mid`, the shared P-value
+    /// threshold applied to F3/F3b/F4/F4b/F5/F5b (cm_pipeline.c:476). `None` ⇒ 0.02.
+    pub fmid: Option<f64>,
     /// C `--rt1/--rt2/--rt3` (defaults 0.25/0.10/0.20, cm_pipeline.c:309-311): the
     /// glocal domain/envelope-definition region thresholds. `None` = default.
     /// Incompatible with `--max`/`--nohmm` (which skip env-def).
@@ -379,7 +382,7 @@ impl Default for FaithfulConfig {
             no_f1: false, no_f2: false, no_f3: false, no_f4: false,
             no_f2b: false, no_f3b: false, no_f4b: false, do_f1b: false, do_f5b: false,
             f6: None, cykenvx: None, no_f6: false, nocykenv: false,
-            tau: None, ftau: None, maxtau: None, fz: None,
+            tau: None, ftau: None, maxtau: None, fz: None, fmid: None,
             rt1: None, rt2: None, rt3: None, ns: None,
             hmmonly: false, nohmmonly: false, hmmmax: false,
             hmm_f1: None, hmm_f2: None, hmm_f3: None,
@@ -1510,10 +1513,19 @@ impl FaithfulSearcher {
         // (lines 545/554); --max/--nohmm/--mid also turn them off (forced below).
         let (mut do_vit, mut do_vitbias): (bool, bool);
         let (mut f2, mut f2b): (f64, f64);
-        // C cm_pipeline.c:479-490: `--rfam` preset — identical to the >= 20 Gb tier.
-        // Takes precedence over the Z-dependent default tier (C `else if(--rfam)`),
-        // but not over --max/--nohmm/--mid (earlier `else if`s; forced off below).
-        if cfg.rfam && !do_max && !nohmm && !do_mid {
+        // C cm_pipeline.c:470-478: `--mid` preset — a top-level filter-strategy branch
+        // (mutually exclusive with --max/--nohmm/--rfam and the Z-dependent default
+        // tier). It turns OFF MSV(F1)/Viterbi(F2) and sets ONE shared P-value threshold
+        // for ALL remaining HMM stages: F3 = F3b = F4 = F4b = F5 = F5b = --Fmid (default
+        // 0.02). Crucially this OVERRIDES the Z-tier F3..F5 (e.g. 0.005 for a ~2-20 Mb
+        // search space) — omitting it made --mid ~4x too strict on Forward-bias (F3b),
+        // dropping genome-scale hits whose F3b P sits between 0.005 and 0.02.
+        let fmid = cfg.fmid.unwrap_or(0.02);
+        if do_mid {
+            // F1/F2 are unused (MSV/Viterbi off), but mirror C's F1=F2=1.0 for clarity.
+            f1 = 1.0; do_vit = false; do_vitbias = false; f2 = 1.0; f2b = 1.0;
+            f3 = fmid; f3b = fmid; f4 = fmid; f4b = fmid; f5 = fmid;
+        } else if cfg.rfam && !do_max && !nohmm {
             f1 = 0.06; do_vit = true; do_vitbias = true; f2 = 0.02; f2b = 0.02;
             f3 = 0.0002; f3b = 0.0002; f4 = 0.0002; f4b = 0.0002; f5 = 0.0002;
         } else if z_mb >= (20000.0 - smallx1) {

@@ -116,6 +116,28 @@ Infernox is a **single crate** (`infernox`) that mirrors Infernal's library laye
 
 Each Rust source file is annotated with the exact C source file, function, and line range it transcribes (`// C <file>:<func>:<lines>:`), so the port can be audited against the reference line by line.
 
+## Changelog
+
+### 0.1.4
+- **`--mid` search pass fix.** The `--mid` pass now sets the F3/F3b/F4/F4b/F5
+  filter thresholds to `--Fmid` (default `0.02`), matching C Infernal's
+  `cm_pipeline.c` `--mid` handling. Without this, the stricter default
+  thresholds dropped hits that C keeps in a `--mid` scan (e.g. an archaeal
+  tRNA-Gln in a truncated-contig-end scan). Applies to `cmsearch`, `cmscan`,
+  and the library search API.
+- **Internal cleanup.** Removed three never-read bindings (a duplicate counter
+  reset in `cmscan`, a redundant `Option` unwrap in `cmconvert`). Behaviorally
+  inert — all tool output remains byte-identical to C 1.1.5.
+
+### 0.1.3
+- Rebased the `do_notrunc_cm` fix onto the published source so the `-g`
+  (glocal) `--notrunc` isotype-scan path is byte-identical to C.
+
+### 0.1.2
+- First crates.io release of the consolidated single-crate `infernox`.
+  CP9 HMM-band subtract-overflow fix (faithful `wrapping_sub`) that removes a
+  panic on tRNA-length glocal band paths.
+
 ## License
 
 Infernox is distributed under the **BSD 3-Clause License**, the same license as the original Infernal. See [LICENSE](LICENSE).

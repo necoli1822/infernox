@@ -692,6 +692,8 @@ fn main() {
             .get_f64("--FZ")
             .unwrap_or_else(|e| usage_error(&e))
             .or(z_mb),
+        // C `--Fmid <x>`: with --mid, the shared HMM-stage P-value threshold (def 0.02).
+        fmid: parsed.get_f64("--Fmid").unwrap_or_else(|e| usage_error(&e)),
         // C `--rt1/--rt2/--rt3/--ns`: glocal domain/envelope-definition params.
         rt1: parsed.get_f64("--rt1").unwrap_or_else(|e| usage_error(&e)),
         rt2: parsed.get_f64("--rt2").unwrap_or_else(|e| usage_error(&e)),
@@ -954,8 +956,8 @@ fn main() {
         // match C's "includes N truncated hit(s)". HMM-only hits are counted separately.
         let mut cm_n_output = 0u64;
         let mut cm_pos_std = 0u64;
-        n_out_trunc_total = 0;
-        pos_out_trunc_total = 0;
+        // (n_out_trunc_total / pos_out_trunc_total were zero-initialised above and are
+        // untouched until here, so no explicit reset is needed before this recompute.)
         for h in &scan_hits {
             if h.hit.hmmonly {
                 continue;
