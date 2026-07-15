@@ -98,6 +98,21 @@ pub struct VitFilter {
     /// E->C (MOVE) and E->J (LOOP) both = wordify(-log2).
     xw_e_move: i16,
     xw_e_loop: i16,
+
+    // ---- Striped SSE (Farrar) layout, built by [`stripe`] for [`vit_score_sse`]. ----
+    /// Q = p7O_NQW(M) = ESL_MAX(2, (M-1)/8 + 1) — # of 8-wide i16 vectors.
+    q: usize,
+    /// Striped transition scores `om->twv`, one 8-i16 vector per entry, laid out
+    /// exactly as `vf_conversion`: for q=0..Q the 7 interleaved vectors
+    /// [BM,MM,IM,DM,MD,MI,II] at vector index `q*7+t`, then a trailing DD block of
+    /// Q vectors at index `7*Q+q`. Flattened: vector `v` occupies `tw[v*8..v*8+8]`.
+    tw: Vec<i16>,
+    /// Striped match emission scores `om->rwv`: for residue x, vector q at
+    /// `rw[(x*Q+q)*8 .. +8]`; slot z holds model position k=q+1+z*Q (or -inf if k>M).
+    rw: Vec<i16>,
+    /// Lazy-F DD short-circuit bound `om->ddbound_w`
+    /// = max_{k=2..M-2} (TDD(k) + TDM(k+1) - TBM(k+2)). (vf_conversion:910-918)
+    ddbound_w: i16,
 }
 
 /// Build the Viterbi filter from a p7 filter HMM. Faithful to
@@ -181,6 +196,65 @@ pub fn build_vit_filter(p7: &P7Profile) -> VitFilter {
     let xw_e_move = wordify(scale_w, -(LOG2 as f32));
     let xw_e_loop = wordify(scale_w, -(LOG2 as f32));
 
+    // ---- Striped SSE layout (vf_conversion) ----
+    // Q = ESL_MAX(2, (M-1)/8 + 1) (impl_sse.h:25). M>=1 always here.
+    let q = std::cmp::max(2, (m - 1) / 8 + 1);
+
+    // Striped match emissions rwv[x][q][z], k = q+1 + z*Q (vf_conversion:852-858).
+    // Condition k<=M else -inf. rwv_flat is indexed [k][x].
+    let mut rw = vec![NEGINF; KP * q * 8];
+    for x in 0..KP {
+        for qi in 0..q {
+            for z in 0..8 {
+                let k = (qi + 1) + z * q; // model position
+                rw[(x * q + qi) * 8 + z] = if k <= m { rwv[k][x] } else { NEGINF };
+            }
+        }
+    }
+
+    // Striped transitions twv (vf_conversion:860-888). Interleaved 7 vectors per q
+    // [BM,MM,IM,DM,MD,MI,II] then a DD block of Q vectors. Into-M (BM/MM/IM/DM) use
+    // base position k=q+1 with condition k<=M and read t[k-1] (rotated -1); the rest
+    // (MD/MI/II/DD) use k=q+1 with condition k<M and read t[k].
+    let mut tw = vec![NEGINF; (7 * q + q) * 8];
+    for qi in 0..q {
+        for z in 0..8 {
+            let k = (qi + 1) + z * q; // model position
+            let vbase = qi * 7;
+            // BM,MM,IM,DM: k<=M, index [k]/[k-1]
+            let (bm, mm, im, dm) = if k <= m {
+                (vbm[k], tmm[k - 1], tim[k - 1], tdm[k - 1])
+            } else {
+                (NEGINF, NEGINF, NEGINF, NEGINF)
+            };
+            tw[(vbase + 0) * 8 + z] = bm;
+            tw[(vbase + 1) * 8 + z] = mm;
+            tw[(vbase + 2) * 8 + z] = im;
+            tw[(vbase + 3) * 8 + z] = dm;
+            // MD,MI,II: k<M, index [k]
+            let (md, mi, ii) = if k < m {
+                (tmd[k], tmi[k], tii[k])
+            } else {
+                (NEGINF, NEGINF, NEGINF)
+            };
+            tw[(vbase + 4) * 8 + z] = md;
+            tw[(vbase + 5) * 8 + z] = mi;
+            tw[(vbase + 6) * 8 + z] = ii;
+            // DD block (k<M, index [k]).
+            tw[(7 * q + qi) * 8 + z] = if k < m { tdd[k] } else { NEGINF };
+        }
+    }
+
+    // Lazy-F DD bound (vf_conversion:910-918): int16 running max, updated per k.
+    // ddtmp = TDD(k) + TDM(k+1) - TBM(k+2); k = 2..M-2.
+    let mut ddbound_w: i16 = NEGINF;
+    let mut k = 2;
+    while k < m.saturating_sub(1) {
+        let ddtmp = tdd[k] as i32 + tdm[k + 1] as i32 - vbm[k + 2] as i32;
+        ddbound_w = std::cmp::max(ddbound_w as i32, ddtmp) as i16;
+        k += 1;
+    }
+
     VitFilter {
         m,
         scale_w,
@@ -196,6 +270,10 @@ pub fn build_vit_filter(p7: &P7Profile) -> VitFilter {
         tdd,
         xw_e_move,
         xw_e_loop,
+        q,
+        tw,
+        rw,
+        ddbound_w,
     }
 }
 
@@ -206,7 +284,25 @@ pub fn build_vit_filter(p7: &P7Profile) -> VitFilter {
 ///
 /// `dsq` is 1-indexed with sentinels. The length model is (multihit) LOCAL:
 /// `pmove = (2+nj)/(L+2+nj)` with `nj=1` ⇒ `3/(L+3)`; N/C/J LOOP costs are 0.
+///
+/// Runtime dispatcher: uses the striped-SSE kernel [`vit_score_sse`] on x86_64
+/// (byte-identical output, verified by `sse_matches_scalar`), else the scalar
+/// oracle [`vit_score_scalar`].
+#[inline]
 pub fn vit_score(f: &VitFilter, dsq: &[u8], l: usize) -> Option<f32> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("sse2") {
+            // SAFETY: guarded by the sse2 feature check just above.
+            return unsafe { vit_score_sse(f, dsq, l) };
+        }
+    }
+    vit_score_scalar(f, dsq, l)
+}
+
+/// Natural-order scalar oracle. See the module header for why its full serial DD
+/// sweep is bit-identical to the striped SSE "lazy-F" convergence.
+pub fn vit_score_scalar(f: &VitFilter, dsq: &[u8], l: usize) -> Option<f32> {
     let m = f.m;
 
     // p7_oprofile_ReconfigLength: xw[N/C/J][MOVE] = wordify(log(pmove)), pmove =
@@ -288,10 +384,253 @@ pub fn vit_score(f: &VitFilter, dsq: &[u8], l: usize) -> Option<f32> {
     }
 }
 
+/// Horizontal max of 8 i16 lanes — faithful `esl_sse_hmax_epi16` (esl_sse.h:75).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn hmax_epi16(a: core::arch::x86_64::__m128i) -> i16 {
+    use core::arch::x86_64::*;
+    // _MM_SHUFFLE(1,0,3,2) == 0b01_00_11_10.
+    let a = _mm_max_epi16(a, _mm_shuffle_epi32::<0b01_00_11_10>(a));
+    let a = _mm_max_epi16(a, _mm_shufflelo_epi16::<0b01_00_11_10>(a));
+    let a = _mm_max_epi16(a, _mm_srli_epi32::<16>(a));
+    _mm_cvtsi128_si32(a) as i16
+}
+
+/// Striped SIMD (Farrar) i16 Viterbi filter — faithful port of `p7_ViterbiFilter`
+/// (impl_sse/vitfilter.c:82). Byte-identical to [`vit_score_scalar`]; integer
+/// saturating max/add is associative so the striped/interleaved evaluation order
+/// yields the same `xE`/`xC` and thus the same final score. The lazy-F DD loop
+/// converges to the same D values the scalar's full serial DD sweep computes.
+///
+/// SAFETY: caller must ensure the `sse2` target feature is available (guaranteed
+/// on x86_64 baseline; checked in [`vit_score`]).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn vit_score_sse(f: &VitFilter, dsq: &[u8], l: usize) -> Option<f32> {
+    use core::arch::x86_64::*;
+    let q = f.q;
+
+    // p7_oprofile_ReconfigLength (see vit_score_scalar). N/C/J LOOP costs stay 0.
+    let pmove = 3.0_f32 / (l as f32 + 3.0);
+    let xw_move = wordify(f.scale_w, pmove.ln());
+
+    // "-infinity" and the OR-mask (14 zero bytes + one -32768 word in the low lane)
+    // used to refill the lane shifted in by _mm_slli_si128 (vitfilter.c:108-109).
+    let neg_inf = _mm_set1_epi16(NEGINF);
+    let neginfv = _mm_srli_si128::<14>(neg_inf);
+
+    // Load helpers into the flat striped arrays (unaligned; vector v -> [v*8..]).
+    #[inline(always)]
+    unsafe fn ld(base: *const i16, v: usize) -> core::arch::x86_64::__m128i {
+        core::arch::x86_64::_mm_loadu_si128(base.add(v * 8) as *const core::arch::x86_64::__m128i)
+    }
+    let twp = f.tw.as_ptr();
+    let rwp = f.rw.as_ptr();
+
+    // DP rows, one 8-wide vector per q, all -inf (vitfilter.c:113-114).
+    let mut mmx = vec![neg_inf; q];
+    let mut imx = vec![neg_inf; q];
+    let mut dmx = vec![neg_inf; q];
+
+    let mut xn: i16 = f.base_w;
+    let mut xb: i16 = adds(xn, xw_move);
+    let mut xj: i16 = NEGINF;
+    let mut xc: i16 = NEGINF;
+
+    let dd_base = 7 * q; // first DD vector index in `tw`
+
+    for i in 1..=l {
+        let x = dsq[i] as usize;
+        let rbase = x * q; // striped residue-vector base (vectors), rwp offset = rbase*8
+        let mut dcv = neg_inf;
+        let mut xev = neg_inf;
+        let mut dmaxv = neg_inf;
+        let xbv = _mm_set1_epi16(xb);
+
+        // Right-shift (=little-endian left) the wrapped last vector, refill lane0 with -inf.
+        let mut mpv = _mm_or_si128(_mm_slli_si128::<2>(mmx[q - 1]), neginfv);
+        let mut dpv = _mm_or_si128(_mm_slli_si128::<2>(dmx[q - 1]), neginfv);
+        let mut ipv = _mm_or_si128(_mm_slli_si128::<2>(imx[q - 1]), neginfv);
+
+        for qi in 0..q {
+            let vb = qi * 7; // interleaved transition-vector base for this q
+            // M(i,q): max(B->M, M->M, I->M, D->M) + emission. (vitfilter.c:145-150)
+            let mut sv = _mm_adds_epi16(xbv, ld(twp, vb)); // BM
+            sv = _mm_max_epi16(sv, _mm_adds_epi16(mpv, ld(twp, vb + 1))); // MM
+            sv = _mm_max_epi16(sv, _mm_adds_epi16(ipv, ld(twp, vb + 2))); // IM
+            sv = _mm_max_epi16(sv, _mm_adds_epi16(dpv, ld(twp, vb + 3))); // DM
+            sv = _mm_adds_epi16(sv, ld(rwp, rbase + qi)); // emission
+            xev = _mm_max_epi16(xev, sv);
+
+            // Reload prev-row {MDI}(i-1,q) before the delayed stores. (vitfilter.c:155-161)
+            mpv = mmx[qi];
+            dpv = dmx[qi];
+            ipv = imx[qi];
+            mmx[qi] = sv;
+            dmx[qi] = dcv;
+
+            // Partial next D(i,q+1): M->D only, delayed in dcv. (vitfilter.c:166-167)
+            dcv = _mm_adds_epi16(sv, ld(twp, vb + 4)); // MD
+            dmaxv = _mm_max_epi16(dcv, dmaxv);
+
+            // I(i,q). (vitfilter.c:170-171)
+            let sv_i = _mm_adds_epi16(mpv, ld(twp, vb + 5)); // MI
+            imx[qi] = _mm_max_epi16(sv_i, _mm_adds_epi16(ipv, ld(twp, vb + 6))); // II
+        }
+
+        // Specials (vitfilter.c:175-181). Identical to the scalar oracle.
+        let xe = hmax_epi16(xev);
+        if xe >= 32767 {
+            return None; // eslERANGE
+        }
+        xn = adds(xn, 0);
+        xc = xc.max(adds(xe, f.xw_e_move));
+        xj = xj.max(adds(xe, f.xw_e_loop));
+        xb = adds(xj, xw_move).max(adds(xn, xw_move));
+
+        // Lazy-F DD loop (vitfilter.c:197-231).
+        let dmax = hmax_epi16(dmaxv);
+        if (dmax as i32) + (f.ddbound_w as i32) > (xb as i32) {
+            dcv = _mm_or_si128(_mm_slli_si128::<2>(dcv), neginfv);
+            for qi in 0..q {
+                let d = _mm_max_epi16(dcv, dmx[qi]);
+                dmx[qi] = d;
+                dcv = _mm_adds_epi16(d, ld(twp, dd_base + qi));
+            }
+            // Up to three more passes; stop when a full pass adds nothing.
+            loop {
+                dcv = _mm_or_si128(_mm_slli_si128::<2>(dcv), neginfv);
+                let mut qi = 0;
+                while qi < q {
+                    if _mm_movemask_epi8(_mm_cmpgt_epi16(dcv, dmx[qi])) == 0 {
+                        break;
+                    }
+                    let d = _mm_max_epi16(dcv, dmx[qi]);
+                    dmx[qi] = d;
+                    dcv = _mm_adds_epi16(d, ld(twp, dd_base + qi));
+                    qi += 1;
+                }
+                if qi != q {
+                    break;
+                }
+            }
+        } else {
+            // Not calculating DD: just store the last M->D vector. (vitfilter.c:229-230)
+            dmx[0] = _mm_or_si128(_mm_slli_si128::<2>(dcv), neginfv);
+        }
+    }
+
+    // C->T (vitfilter.c:239-247).
+    if xc > NEGINF {
+        let mut ret = xc as f32 + xw_move as f32 - f.base_w as f32;
+        ret /= f.scale_w;
+        Some(ret - 3.0)
+    } else {
+        Some(f32::NEG_INFINITY)
+    }
+}
+
 impl VitFilter {
     /// `(32767 - base_w)/scale_w` — the score assigned on eslERANGE overflow
     /// (evalues.c::p7_ViterbiMu:308).
     pub fn cal_maxsc(&self) -> f32 {
         (32767.0 - self.base_w as f32) / self.scale_w
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::p7_hmm::P7Profile;
+
+    /// Tiny deterministic LCG (Numerical Recipes) — no external RNG dependency.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u32
+        }
+        /// Uniform f32 in [0.05, 1.05) — kept strictly positive so all log-scores
+        /// are finite (build_vit_filter takes ln of every used mat/trans entry).
+        fn unit(&mut self) -> f32 {
+            0.05 + (self.next_u32() as f32 / u32::MAX as f32)
+        }
+    }
+
+    /// Build a random-but-valid RNA p7 filter profile of length M.
+    fn random_profile(rng: &mut Lcg, m: i32) -> P7Profile {
+        let mut p = P7Profile::new(m);
+        for k in 1..=m as usize {
+            let mut s = 0.0f32;
+            let mut e = [0.0f32; 4];
+            for x in 0..4 {
+                e[x] = rng.unit();
+                s += e[x];
+            }
+            for x in 0..4 {
+                e[x] /= s;
+            }
+            p.mat[k] = e;
+        }
+        // Transitions [MM,MI,MD,IM,II,DM,DD], normalized within each source state.
+        for k in 0..=m as usize {
+            let (mm, mi, md) = (rng.unit(), rng.unit(), rng.unit());
+            let ms = mm + mi + md;
+            let (im, ii) = (rng.unit(), rng.unit());
+            let is = im + ii;
+            let (dm, dd) = (rng.unit(), rng.unit());
+            let ds = dm + dd;
+            p.trans[k] = [mm / ms, mi / ms, md / ms, im / is, ii / is, dm / ds, dd / ds];
+        }
+        p
+    }
+
+    fn random_dsq(rng: &mut Lcg, l: usize) -> Vec<u8> {
+        // Index 0 sentinel; 1..=l residues; last sentinel. Codes 0..=15 exercise
+        // canonical + IUPAC-degenerate + gap emission rows of the striped table.
+        let mut dsq = vec![0u8; l + 2];
+        for i in 1..=l {
+            dsq[i] = (rng.next_u32() % 16) as u8;
+        }
+        dsq
+    }
+
+    /// The striped-SSE kernel must be byte-identical to the scalar oracle across
+    /// every Q=ceil(M/8) boundary, a range of sequence lengths, and many random
+    /// profiles/sequences. Compares raw f32 bits (so any xC divergence is caught).
+    #[test]
+    fn sse_matches_scalar() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !std::is_x86_feature_detected!("sse2") {
+                return; // no SSE2 -> dispatcher uses scalar; nothing to diff.
+            }
+            let mut rng = Lcg(0x1234_5678_9abc_def0);
+            // M values straddling the 8-word vector boundary (and the Q>=2 floor).
+            let ms = [1, 2, 3, 7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 40, 63, 64, 65, 100, 128, 200];
+            let ls = [1usize, 2, 5, 17, 50, 200, 500];
+            let mut n_checked = 0u64;
+            for &m in &ms {
+                for _rep in 0..8 {
+                    let p = random_profile(&mut rng, m);
+                    let vf = build_vit_filter(&p);
+                    for &l in &ls {
+                        let dsq = random_dsq(&mut rng, l);
+                        let sc_scalar = vit_score_scalar(&vf, &dsq, l);
+                        let sc_sse = unsafe { vit_score_sse(&vf, &dsq, l) };
+                        let bits =
+                            |o: Option<f32>| o.map(|v| v.to_bits());
+                        assert_eq!(
+                            bits(sc_scalar),
+                            bits(sc_sse),
+                            "VF mismatch M={m} L={l}: scalar={sc_scalar:?} sse={sc_sse:?}"
+                        );
+                        n_checked += 1;
+                    }
+                }
+            }
+            assert!(n_checked > 1000, "expected many checks, got {n_checked}");
+        }
     }
 }

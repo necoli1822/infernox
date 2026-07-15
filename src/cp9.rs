@@ -48,13 +48,28 @@ fn ilogsum_table() -> &'static [i32; LOGSUM_TBL] {
 ///   return (min <= -INFTY || (max-min) >= LOGSUM_TBL) ? max : max + ilogsum_lookup[max-min];
 #[inline]
 pub fn ilogsum(s1: i32, s2: i32) -> i32 {
+    ilogsum_with(ilogsum_table(), s1, s2)
+}
+
+/// Public accessor so hot DP kernels can hoist the lookup table once
+/// (`let lt = ilogsum_lut();`) out of their inner loops and call
+/// [`ilogsum_with`], instead of paying `ilogsum_table()`'s `OnceLock` check
+/// per cell (C accesses the plain global `ilogsum_lookup[]` for free).
+#[inline]
+pub fn ilogsum_lut() -> &'static [i32; LOGSUM_TBL] {
+    ilogsum_table()
+}
+
+/// Table-taking `ilogsum` for hoisted hot loops. Bit-identical to [`ilogsum`].
+#[inline(always)]
+pub fn ilogsum_with(tbl: &[i32; LOGSUM_TBL], s1: i32, s2: i32) -> i32 {
     let max = (-INFTY).max(s1.max(s2));
     let min = s1.min(s2);
     let diff = max - min;
     if min <= -INFTY || diff as i64 >= LOGSUM_TBL as i64 {
         max
     } else {
-        max + ilogsum_table()[diff as usize]
+        max + tbl[diff as usize]
     }
 }
 
@@ -1268,6 +1283,8 @@ pub fn cp9_forward(
     let m = hmm.m as usize;
     let l = j0 - i0 + 1;
     let ninf = -INFTY;
+    // Hoist the ilogsum lookup table once (vs an OnceLock check per cell).
+    let lt = ilogsum_lut();
     let mut mmx = vec![vec![ninf; m + 1]; l + 1];
     let mut imx = vec![vec![ninf; m + 1]; l + 1];
     let mut dmx = vec![vec![ninf; m + 1]; l + 1];
@@ -1295,8 +1312,8 @@ pub fn cp9_forward(
         mmx[0][k] = ninf;
         imx[0][k] = ninf;
         elmx[0][k] = ninf;
-        let sc = ilogsum(
-            ilogsum(
+        let sc = ilogsum_with(lt, 
+            ilogsum_with(lt, 
                 mmx[0][k - 1] + tsc!(CP9O_MD, k - 1),
                 imx[0][k - 1] + tsc!(CP9O_ID, k - 1),
             ),
@@ -1342,8 +1359,8 @@ pub fn cp9_forward(
         dmx_cur[0] = ninf;
         elmx_cur[0] = ninf;
 
-        let sc = ilogsum(
-            ilogsum(
+        let sc = ilogsum_with(lt, 
+            ilogsum_with(lt, 
                 mmx_prv[0] + tsc!(CP9O_MI, 0),
                 imx_prv[0] + tsc!(CP9O_II, 0),
             ),
@@ -1357,27 +1374,27 @@ pub fn cp9_forward(
         let mut endsc = ninf;
         for k in 1..=m {
             // match
-            let mut sc = ilogsum(
-                ilogsum(
+            let mut sc = ilogsum_with(lt, 
+                ilogsum_with(lt, 
                     mmx_prv[k - 1] + tsc!(CP9O_MM, k - 1),
                     imx_prv[k - 1] + tsc!(CP9O_IM, k - 1),
                 ),
-                ilogsum(
+                ilogsum_with(lt, 
                     dmx_prv[k - 1] + tsc!(CP9O_DM, k - 1),
                     mmx_prv[0] + tsc!(CP9O_BM, k),
                 ),
             );
             for c in 0..hmm.el_from_ct[k] as usize {
-                sc = ilogsum(sc, elmx_prv[hmm.el_from_idx[k][c] as usize]);
+                sc = ilogsum_with(lt, sc, elmx_prv[hmm.el_from_idx[k][c] as usize]);
             }
             mmx_cur[k] = (sc + hmm.msc[k][dj]).max(ninf); // C: ESL_MAX(sc+msc,-INFTY) (cp9_dp.c:190)
 
             // E state update
-            endsc = ilogsum(endsc, mmx_cur[k] + tsc!(CP9O_ME, k));
+            endsc = ilogsum_with(lt, endsc, mmx_cur[k] + tsc!(CP9O_ME, k));
 
             // insert
-            let sc = ilogsum(
-                ilogsum(
+            let sc = ilogsum_with(lt, 
+                ilogsum_with(lt, 
                     mmx_prv[k] + tsc!(CP9O_MI, k),
                     imx_prv[k] + tsc!(CP9O_II, k),
                 ),
@@ -1386,8 +1403,8 @@ pub fn cp9_forward(
             imx_cur[k] = (sc + hmm.isc[k][dj]).max(ninf); // C: ESL_MAX(sc+isc,-INFTY) (cp9_dp.c:199)
 
             // delete
-            let sc = ilogsum(
-                ilogsum(
+            let sc = ilogsum_with(lt, 
+                ilogsum_with(lt, 
                     mmx_cur[k - 1] + tsc!(CP9O_MD, k - 1),
                     imx_cur[k - 1] + tsc!(CP9O_ID, k - 1),
                 ),
@@ -1398,19 +1415,19 @@ pub fn cp9_forward(
             // EL
             let mut sc = ninf;
             if (hmm.flags & CPLAN9_EL != 0) && hmm.has_el[k] {
-                sc = ilogsum(
+                sc = ilogsum_with(lt, 
                     mmx_cur[k] + tsc!(CP9O_MEL, k),
                     elmx_prv[k] + el_selfsc,
                 );
             }
             elmx_cur[k] = sc;
         }
-        endsc = ilogsum(
-            ilogsum(endsc, dmx_cur[m] + tsc!(CP9O_DM, m)),
+        endsc = ilogsum_with(lt, 
+            ilogsum_with(lt, endsc, dmx_cur[m] + tsc!(CP9O_DM, m)),
             imx_cur[m] + tsc!(CP9O_IM, m),
         );
         for c in 0..hmm.el_from_ct[m + 1] as usize {
-            endsc = ilogsum(endsc, elmx_cur[hmm.el_from_idx[m + 1][c] as usize]);
+            endsc = ilogsum_with(lt, endsc, elmx_cur[hmm.el_from_idx[m + 1][c] as usize]);
         }
         erow[cur] = endsc;
         sca[jp] = endsc;
@@ -1988,6 +2005,8 @@ pub fn cp9_backward(
     let ninf = -INFTY;
     let el = hmm.flags & CPLAN9_EL != 0;
     let el_selfsc = hmm.el_selfsc;
+    // Hoist the ilogsum lookup table once (vs an OnceLock check per cell).
+    let lt = ilogsum_lut();
     let mut mmx = vec![vec![ninf; m + 1]; l + 1];
     let mut imx = vec![vec![ninf; m + 1]; l + 1];
     let mut dmx = vec![vec![ninf; m + 1]; l + 1];
@@ -2014,14 +2033,14 @@ pub fn cp9_backward(
             elmx[cur][hmm.el_from_idx[m + 1][c] as usize] = 0;
         }
     }
-    mmx[cur][m] = ilogsum(elmx[cur][m] + tsc!(CP9O_MEL, m), tsc!(CP9O_ME, m)) + hmm.msc[m][dj0];
+    mmx[cur][m] = ilogsum_with(lt, elmx[cur][m] + tsc!(CP9O_MEL, m), tsc!(CP9O_ME, m)) + hmm.msc[m][dj0];
     imx[cur][m] = tsc!(CP9O_IM, m) + hmm.isc[m][dj0];
     dmx[cur][m] = tsc!(CP9O_DM, m);
     for k in (1..m).rev() {
         let mut v = tsc!(CP9O_ME, k);
-        v = ilogsum(v, dmx[cur][k + 1] + tsc!(CP9O_MD, k));
+        v = ilogsum_with(lt, v, dmx[cur][k + 1] + tsc!(CP9O_MD, k));
         if el {
-            v = ilogsum(v, elmx[cur][k] + tsc!(CP9O_MEL, k));
+            v = ilogsum_with(lt, v, elmx[cur][k] + tsc!(CP9O_MEL, k));
         }
         mmx[cur][k] = v + hmm.msc[k][dj0];
         imx[cur][k] = dmx[cur][k + 1] + tsc!(CP9O_ID, k) + hmm.isc[k][dj0];
@@ -2063,14 +2082,14 @@ pub fn cp9_backward(
         }
         mmx_cur[m] = imx_prv[m] + tsc!(CP9O_MI, m) + hmm.msc[m][di];
         if el && hmm.has_el[m] {
-            mmx_cur[m] = ilogsum(mmx_cur[m], elmx_cur[m] + tsc!(CP9O_MEL, m));
+            mmx_cur[m] = ilogsum_with(lt, mmx_cur[m], elmx_cur[m] + tsc!(CP9O_MEL, m));
         }
         imx_cur[m] = imx_prv[m] + tsc!(CP9O_II, m) + hmm.isc[m][di];
         dmx_cur[m] = imx_prv[m] + tsc!(CP9O_DI, m);
         if el {
             for c in 0..hmm.el_from_ct[m] as usize {
                 let src = hmm.el_from_idx[m][c] as usize;
-                elmx_cur[src] = ilogsum(elmx_cur[src], mmx_prv[m]);
+                elmx_cur[src] = ilogsum_with(lt, elmx_cur[src], mmx_prv[m]);
             }
         }
         if do_scan {
@@ -2079,56 +2098,56 @@ pub fn cp9_backward(
                     elmx_cur[hmm.el_from_idx[m + 1][c] as usize] = 0;
                 }
             }
-            mmx_cur[m] = ilogsum(
+            mmx_cur[m] = ilogsum_with(lt, 
                 mmx_cur[m],
-                ilogsum(elmx_cur[m] + tsc!(CP9O_MEL, m), tsc!(CP9O_ME, m)),
+                ilogsum_with(lt, elmx_cur[m] + tsc!(CP9O_MEL, m), tsc!(CP9O_ME, m)),
             );
-            imx_cur[m] = ilogsum(imx_cur[m], tsc!(CP9O_IM, m));
-            dmx_cur[m] = ilogsum(dmx_cur[m], tsc!(CP9O_DM, m));
+            imx_cur[m] = ilogsum_with(lt, imx_cur[m], tsc!(CP9O_IM, m));
+            dmx_cur[m] = ilogsum_with(lt, dmx_cur[m], tsc!(CP9O_DM, m));
         }
         for k in (1..m).rev() {
             if el {
                 for c in 0..hmm.el_from_ct[k] as usize {
                     let src = hmm.el_from_idx[k][c] as usize;
-                    elmx_cur[src] = ilogsum(elmx_cur[src], mmx_prv[k]);
+                    elmx_cur[src] = ilogsum_with(lt, elmx_cur[src], mmx_prv[k]);
                 }
             }
             if el && hmm.has_el[k] {
-                elmx_cur[k] = ilogsum(elmx_cur[k], elmx_prv[k] + el_selfsc);
+                elmx_cur[k] = ilogsum_with(lt, elmx_cur[k], elmx_prv[k] + el_selfsc);
             }
-            let mut mv = ilogsum(
-                ilogsum(mmx_prv[k + 1] + tsc!(CP9O_MM, k), imx_prv[k] + tsc!(CP9O_MI, k)),
+            let mut mv = ilogsum_with(lt, 
+                ilogsum_with(lt, mmx_prv[k + 1] + tsc!(CP9O_MM, k), imx_prv[k] + tsc!(CP9O_MI, k)),
                 dmx_cur[k + 1] + tsc!(CP9O_MD, k),
             );
             if el && hmm.has_el[k] {
-                mv = ilogsum(mv, elmx_cur[k] + tsc!(CP9O_MEL, k));
+                mv = ilogsum_with(lt, mv, elmx_cur[k] + tsc!(CP9O_MEL, k));
             }
             mmx_cur[k] = mv + hmm.msc[k][di];
-            imx_cur[k] = ilogsum(
-                ilogsum(mmx_prv[k + 1] + tsc!(CP9O_IM, k), imx_prv[k] + tsc!(CP9O_II, k)),
+            imx_cur[k] = ilogsum_with(lt, 
+                ilogsum_with(lt, mmx_prv[k + 1] + tsc!(CP9O_IM, k), imx_prv[k] + tsc!(CP9O_II, k)),
                 dmx_cur[k + 1] + tsc!(CP9O_ID, k),
             ) + hmm.isc[k][di];
             if do_scan {
-                mmx_cur[k] = ilogsum(mmx_cur[k], tsc!(CP9O_ME, k));
+                mmx_cur[k] = ilogsum_with(lt, mmx_cur[k], tsc!(CP9O_ME, k));
             }
-            dmx_cur[k] = ilogsum(
-                ilogsum(mmx_prv[k + 1] + tsc!(CP9O_DM, k), imx_prv[k] + tsc!(CP9O_DI, k)),
+            dmx_cur[k] = ilogsum_with(lt, 
+                ilogsum_with(lt, mmx_prv[k + 1] + tsc!(CP9O_DM, k), imx_prv[k] + tsc!(CP9O_DI, k)),
                 dmx_cur[k + 1] + tsc!(CP9O_DD, k),
             );
         }
         // k == 0
-        imx_cur[0] = ilogsum(
-            ilogsum(mmx_prv[1] + tsc!(CP9O_IM, 0), imx_prv[0] + tsc!(CP9O_II, 0)),
+        imx_cur[0] = ilogsum_with(lt, 
+            ilogsum_with(lt, mmx_prv[1] + tsc!(CP9O_IM, 0), imx_prv[0] + tsc!(CP9O_II, 0)),
             dmx_cur[1] + tsc!(CP9O_ID, 0),
         ) + hmm.isc[0][di];
         dmx_cur[0] = ninf;
         elmx_cur[0] = ninf;
         let mut b = ninf;
         for k in (1..=m).rev() {
-            b = ilogsum(b, mmx_prv[k] + tsc!(CP9O_BM, k));
+            b = ilogsum_with(lt, b, mmx_prv[k] + tsc!(CP9O_BM, k));
         }
-        b = ilogsum(b, imx_prv[0] + tsc!(CP9O_MI, 0));
-        b = ilogsum(b, dmx_cur[1] + tsc!(CP9O_MD, 0));
+        b = ilogsum_with(lt, b, imx_prv[0] + tsc!(CP9O_MI, 0));
+        b = ilogsum_with(lt, b, dmx_cur[1] + tsc!(CP9O_MD, 0));
         mmx_cur[0] = b;
         sca[ip] = mmx_cur[0];
         let fsc = scorify(sca[ip]);
@@ -2150,14 +2169,14 @@ pub fn cp9_backward(
         elmx[cur][m] = ninf;
         dmx[cur][m] = imx[prv][m] + tsc!(CP9O_DI, m);
         if do_scan {
-            dmx[cur][m] = ilogsum(dmx[cur][m], tsc!(CP9O_DM, m));
+            dmx[cur][m] = ilogsum_with(lt, dmx[cur][m], tsc!(CP9O_DM, m));
         }
         for k in (1..m).rev() {
             mmx[cur][k] = ninf;
             imx[cur][k] = ninf;
             elmx[cur][k] = ninf;
-            dmx[cur][k] = ilogsum(
-                ilogsum(mmx[prv][k + 1] + tsc!(CP9O_DM, k), imx[prv][k] + tsc!(CP9O_DI, k)),
+            dmx[cur][k] = ilogsum_with(lt, 
+                ilogsum_with(lt, mmx[prv][k + 1] + tsc!(CP9O_DM, k), imx[prv][k] + tsc!(CP9O_DI, k)),
                 dmx[cur][k + 1] + tsc!(CP9O_DD, k),
             );
         }
@@ -2166,10 +2185,10 @@ pub fn cp9_backward(
         elmx[cur][0] = ninf;
         let mut b = ninf;
         for k in (1..=m).rev() {
-            b = ilogsum(b, mmx[prv][k] + tsc!(CP9O_BM, k));
+            b = ilogsum_with(lt, b, mmx[prv][k] + tsc!(CP9O_BM, k));
         }
-        b = ilogsum(b, imx[prv][0] + tsc!(CP9O_MI, 0));
-        b = ilogsum(b, dmx[cur][1] + tsc!(CP9O_MD, 0));
+        b = ilogsum_with(lt, b, imx[prv][0] + tsc!(CP9O_MI, 0));
+        b = ilogsum_with(lt, b, dmx[cur][1] + tsc!(CP9O_MD, 0));
         mmx[cur][0] = b;
         sca[0] = mmx[cur][0];
         let fsc = scorify(sca[0]);

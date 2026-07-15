@@ -44,20 +44,6 @@ use rayon::prelude::*;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-// Per-stage wall-time accumulators (ns), summed across worker threads. Always
-// accumulated (coarse, ~per-task/per-envelope granularity → negligible cost);
-// printed only when STAGE_TIMING is set. Run with --cpu 1 for clean attribution.
-pub static T_F1F3: AtomicU64 = AtomicU64::new(0); // F1 MSV + F3 Forward + F3b bias
-pub static T_F4F5: AtomicU64 = AtomicU64::new(0); // glocal Forward/Backward + envelope def
-pub static T_F6BAND: AtomicU64 = AtomicU64::new(0); // F6 CP9 HMM banding (seq2bands)
-pub static T_F6CYK: AtomicU64 = AtomicU64::new(0); // F6 banded CYK scan
-pub static T_F7BAND: AtomicU64 = AtomicU64::new(0); // F7 CP9 HMM banding (seq2bands)
-pub static T_F7INS: AtomicU64 = AtomicU64::new(0); // F7 banded Inside scan + null3
-#[inline]
-fn stage_add(ctr: &AtomicU64, t: std::time::Instant) {
-    ctr.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-}
-
 /// Build a 1-based sentinel-padded digital subsequence `[255, res_1..res_L, 255]`
 /// from a hit's aligner dsq slice (`hit_dsq[1..=L]` are the emitted residues, matching
 /// the parsetree's `emitl`/`emitr` coords). Used to retain the hit subseq for the
@@ -2060,7 +2046,6 @@ impl FaithfulSearcher {
         let _t = std::time::Instant::now();
         let (merged, _f1f3) = f3_filter_sequence(&self.mf, &self.ff, &self.bf, wdsq, win_len, f1, f3, f3b, cm.w as i64,
             self.std_msvbias_params(do_msvbias, f1b), self.std_vit_params(do_vit, f2, do_vitbias, f2b), do_fwd, do_fwdbias, do_msv, self.maxw);
-        stage_add(&T_F1F3, _t);
         if std::env::var("IX_DEBUG").is_ok() {
             let tot: i64 = merged.iter().map(|w| (w.end - w.start + 1) as i64).sum();
             eprintln!("[F1F3] win_len={} gm.m={} merged_wins={} total_merged_len={} t={:.2}s",
@@ -2068,7 +2053,6 @@ impl FaithfulSearcher {
         }
 
         // ---- F4/F4b/F5: envelope definition per surviving window ----
-        let _t45 = std::time::Instant::now();
         let mut p7envs: Vec<(i32, i32)> = Vec::new(); // (es, ee) window-local
         for w in merged.iter() {
             let ws = w.start;
@@ -2130,7 +2114,6 @@ impl FaithfulSearcher {
                 }
             }
         }
-        stage_add(&T_F4F5, _t45);
         if p7envs.is_empty() {
             return Vec::new();
         }
@@ -2150,7 +2133,6 @@ impl FaithfulSearcher {
             let _tb = std::time::Instant::now();
             let (cp9b, _tau, mb) =
                 cp9_iterate_seq2bands(cm, cp9, map, wdsq, es, ee, fcyk_tau, maxtau, size_limit, true, true);
-            stage_add(&T_F6BAND, _tb);
             if std::env::var("IX_DEBUG").is_ok() {
                 eprintln!("[F6] env es={} ee={} len={} band_mb={:.1} band_t={:.2}s",
                     es, ee, ee - es + 1, mb, _tb.elapsed().as_secs_f64());
@@ -2160,7 +2142,6 @@ impl FaithfulSearcher {
             } // eslERANGE overflow: skip envelope
             let _tc = std::time::Instant::now();
             let (sc, envi, envj) = fast_cyk_scan_hb(cm, &cp9b, wdsq, es, ee, cyk_env_cutoff);
-            stage_add(&T_F6CYK, _tc);
             if std::env::var("IX_DEBUG").is_ok() {
                 eprintln!("[F6] CYK es={} ee={} cyk_t={:.2}s sc={:.1}", es, ee, _tc.elapsed().as_secs_f64(), sc);
             }
@@ -2186,17 +2167,13 @@ impl FaithfulSearcher {
         let mut out: Vec<(i32, i32, f32, f32, i32, i32, Option<crate::cm_alidisplay::CmAliDisplay>)> =
             Vec::new();
         for &(es, ee) in surv_env.iter() {
-            let _tb = std::time::Instant::now();
             let (cp9b, _tau, mb) =
                 cp9_iterate_seq2bands(cm, cp9, map, wdsq, es, ee, final_tau, maxtau, size_limit, true, true);
-            stage_add(&T_F7BAND, _tb);
             if mb > size_limit {
                 continue;
             }
-            let _ti = std::time::Instant::now();
             let (_sc, _ei, _ej, raw) =
                 fast_finside_scan_hb(cm, &cp9b, wdsq, es, ee, 0.0, pli_t, do_null3);
-            stage_add(&T_F7INS, _ti);
             let surv = remove_overlaps_greedy(raw);
             // Per surviving hit: HMM-banded CYK align (shifted bands) -> mdl from/to.
             // C: pli_align_hit -> cp9_ShiftCMBands -> DispatchSqAlignment -> ParsetreeToCMBounds.
@@ -3156,7 +3133,6 @@ impl FaithfulSearcher {
         // GLOCAL (`-g`) scans the global CM; the default LOCAL config scans the
         // local-begin scan CM (finite ibeginsc → root local begins in generic_scan).
         let cm = if global { &self.cm_global } else { &self.cm_local_scan };
-        let _t = std::time::Instant::now();
         // C `--noF6` (do_fcyk=FALSE): skip the CYK seq filter — the whole window
         // becomes a single envelope handed straight to the final stage.
         let envs = if do_fcyk {
@@ -3164,7 +3140,6 @@ impl FaithfulSearcher {
         } else {
             vec![(1i32, win_len as i32)]
         };
-        stage_add(&T_F6CYK, _t);
         // C pli_cyk_seq_filter (cm_pipeline.c:3599): each envelope surviving the CYK
         // seq filter charges n_past_cyk++ / pos_past_cyk += (ee-es+1) to the STD pass —
         // the "Envelopes passing local CM CYK filter" line. Only when the filter ran
@@ -3177,9 +3152,7 @@ impl FaithfulSearcher {
         if envs.is_empty() {
             return Vec::new();
         }
-        let _ti = std::time::Instant::now();
         let hits = crate::cm_nohmm::final_stage_inside(cm, wdsq, &envs, pli_t, do_null3);
-        stage_add(&T_F7INS, _ti);
         // Emit map (node structure only; config-independent) for faithful
         // ParsetreeToCMBounds + EL local-end rendering in cm_alidisplay_Create.
         let emap = crate::cp9::create_emit_map(cm);
@@ -3230,10 +3203,8 @@ impl FaithfulSearcher {
         let cm = if global { &self.cm_global } else { &self.cm_local_scan };
         let align_cm = cm;
         let envs = [(1i32, win_len as i32)];
-        let _ti = std::time::Instant::now();
         let hits =
             crate::cm_nohmm::final_stage_inside_opt(cm, wdsq, &envs, pli_t, do_null3, /*nonbanded=*/ true);
-        stage_add(&T_F7INS, _ti);
         let emap = crate::cp9::create_emit_map(align_cm);
         hits.into_iter()
             .map(|h| {

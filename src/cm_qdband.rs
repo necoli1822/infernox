@@ -364,12 +364,40 @@ pub fn band_calculation_engine(
             let cfirst = cm.cfirst[v] as usize;
             let cnum = cm.cnum[v] as usize;
 
-            for n in dv..=z {
-                for yoffset in 0..cnum {
-                    let y = cfirst + yoffset;
-                    gamma[v][n] += t_copy[v][yoffset] as f64 * gamma[y][n - dv];
+            // Insert states carry a self-transition (some child y == v), making the
+            // recurrence gamma[v][n] += t*gamma[v][n-dv] an intra-row dependency whose
+            // ascending-n order must be preserved bit-for-bit → keep the serial
+            // n-outer form. Every OTHER state's children are all y>v (finalized in
+            // this bottom-up sweep) and disjoint from gamma[v], so we can loop-swap
+            // to yoffset-outer / n-inner: each gamma[v][n] still accumulates over
+            // yoffset in ascending order (bit-identical) but the inner n-loop is a
+            // contiguous SAXPY that LLVM auto-vectorizes.
+            let has_self = (0..cnum).any(|yo| cfirst + yo == v);
+            if has_self {
+                for n in dv..=z {
+                    for yoffset in 0..cnum {
+                        let y = cfirst + yoffset;
+                        gamma[v][n] += t_copy[v][yoffset] as f64 * gamma[y][n - dv];
+                    }
+                    pdf += gamma[v][n];
                 }
-                pdf += gamma[v][n];
+            } else {
+                let (head, tail) = gamma.split_at_mut(v + 1);
+                let gv = &mut head[v]; // gamma[v]
+                for yoffset in 0..cnum {
+                    let y = cfirst + yoffset; // y > v
+                    let t = t_copy[v][yoffset] as f64;
+                    let gy = &tail[y - v - 1]; // gamma[y]
+                    // gamma[v][dv+j] += t * gamma[y][j], j=0..=z-dv  (n=dv..=z)
+                    let dst = &mut gv[dv..=z];
+                    let src = &gy[0..=(z - dv)];
+                    for (d, s) in dst.iter_mut().zip(src.iter()) {
+                        *d += t * *s;
+                    }
+                }
+                for n in dv..=z {
+                    pdf += gv[n];
+                }
             }
         }
 

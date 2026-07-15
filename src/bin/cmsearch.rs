@@ -11,11 +11,9 @@
 use infernox::cm_file::cm_file_read_from_reader_opt;
 use infernox::cm_search::{
     FaithfulConfig, FaithfulHit, FaithfulSearcher, ModelCutoff, PassAcctSnapshot, PliStats,
-    T_F1F3, T_F4F5, T_F6BAND, T_F6CYK, T_F7BAND, T_F7INS,
 };
 use infernox::search_cli::{ArgKind, OptSpec, Parsed};
 use std::io::BufReader;
-use std::sync::atomic::Ordering;
 
 /// The complete `cmsearch` option table (name + argument arity), mirroring the
 /// `ESL_OPTIONS options[]` array in cmsearch.c. Every option C recognizes is
@@ -1171,28 +1169,6 @@ fn main() {
     match parsed.get_str("-o") {
         Some(path) => std::fs::write(path, &human).expect("write -o"),
         None => print!("{}", human),
-    }
-
-    if std::env::var("STAGE_TIMING").is_ok() {
-        let rows = [
-            ("F1+F3+F3b  (MSV/Fwd/bias filter)", T_F1F3.load(Ordering::Relaxed)),
-            ("F4+F4b+F5  (glocal Fwd/Bwd+envdef)", T_F4F5.load(Ordering::Relaxed)),
-            ("F6 bands   (CP9 HMM banding)", T_F6BAND.load(Ordering::Relaxed)),
-            ("F6 CYK     (banded CYK scan)", T_F6CYK.load(Ordering::Relaxed)),
-            ("F7 bands   (CP9 HMM banding)", T_F7BAND.load(Ordering::Relaxed)),
-            ("F7 Inside  (banded Inside+null3)", T_F7INS.load(Ordering::Relaxed)),
-        ];
-        let sum: u64 = rows.iter().map(|r| r.1).sum();
-        eprintln!("\n=== per-stage CPU time (summed over threads; run with --cpu 1) ===");
-        for (name, ns) in rows {
-            eprintln!(
-                "  {:<36} {:>8.1} ms  {:>5.1}%",
-                name,
-                ns as f64 / 1e6,
-                if sum > 0 { 100.0 * ns as f64 / sum as f64 } else { 0.0 }
-            );
-        }
-        eprintln!("  {:<36} {:>8.1} ms", "TOTAL (pipeline stages)", sum as f64 / 1e6);
     }
 }
 

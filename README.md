@@ -118,6 +118,16 @@ Each Rust source file is annotated with the exact C source file, function, and l
 
 ## Changelog
 
+### 0.2.0
+- **Striped-SSE (Farrar) Viterbi filter.** The P7 Viterbi filter now has an
+  SSE2 SIMD kernel with a striped (Farrar) profile layout, dispatched at runtime
+  (`is_x86_feature_detected!("sse2")`) with a scalar fallback on other targets.
+  Output is byte-identical to the scalar path (verified by `sse_matches_scalar`)
+  and to C 1.1.5 — this is a pure speedup that closes the single-thread
+  striped-vs-serial gap noted below.
+- **Log-sum lookup table** (`ilogsum_lut`/`ilogsum_with`) for the CP9 DP hot path.
+- **Full cross-crate LTO** (`lto = "fat"`): ~1.3% faster DP kernels (+~5s compile).
+
 ### 0.1.4
 - **`--mid` search pass fix.** The `--mid` pass now sets the F3/F3b/F4/F4b/F5
   filter thresholds to `--Fmid` (default `0.02`), matching C Infernal's

@@ -45,12 +45,26 @@ fn flogsum_table() -> &'static [f32; P7_LOGSUM_TBL] {
 ///          ? max : max + flogsum_lookup[(int)((max-min)*p7_LOGSUM_SCALE)];
 #[inline]
 pub fn p7_flogsum(a: f32, b: f32) -> f32 {
+    p7_flogsum_with(flogsum_table(), a, b)
+}
+
+/// Hoist the FLogsum lookup table once out of a hot DP loop (`let lt =
+/// p7_flogsum_lut();`) to avoid `flogsum_table()`'s per-call `OnceLock` check;
+/// C reads the plain global `flogsum_lookup[]`. Use with [`p7_flogsum_with`].
+#[inline]
+pub fn p7_flogsum_lut() -> &'static [f32; P7_LOGSUM_TBL] {
+    flogsum_table()
+}
+
+/// Table-taking `p7_flogsum` for hoisted loops. Bit-identical to [`p7_flogsum`].
+#[inline(always)]
+pub fn p7_flogsum_with(tbl: &[f32; P7_LOGSUM_TBL], a: f32, b: f32) -> f32 {
     let max = if a > b { a } else { b };
     let min = if a > b { b } else { a };
     if min == NEG_INF || (max - min) >= 15.7f32 {
         max
     } else {
-        max + flogsum_table()[((max - min) * P7_LOGSUM_SCALE) as usize]
+        max + tbl[((max - min) * P7_LOGSUM_SCALE) as usize]
     }
 }
 
@@ -925,6 +939,8 @@ unsafe fn p7_gforward_avx2(dsq: &[u8], l: usize, gm: &GlocalProfile, gx: &mut P7
 pub fn p7_gbackward(dsq: &[u8], l: usize, gm: &GlocalProfile, gx: &mut P7Gmx) -> f32 {
     let mm = gm.m;
     let esc = if gm.local_end { 0.0 } else { NEG_INF };
+    // Hoist the FLogsum table once out of the per-cell inner loop.
+    let lt = p7_flogsum_lut();
 
     // C 180-192: initialize the L row.
     gx.set_xmx(l, P7G_J, NEG_INF);
@@ -937,9 +953,9 @@ pub fn p7_gbackward(dsq: &[u8], l: usize, gm: &GlocalProfile, gx: &mut P7Gmx) ->
     gx.set_dmx(l, mm, gx.xmx(l, P7G_E));
     gx.set_imx(l, mm, NEG_INF);
     for k in (1..mm).rev() {
-        let mval = p7_flogsum(gx.xmx(l, P7G_E) + esc, gx.dmx(l, k + 1) + tsc(gm, P7P_MD, k));
+        let mval = p7_flogsum_with(lt, gx.xmx(l, P7G_E) + esc, gx.dmx(l, k + 1) + tsc(gm, P7P_MD, k));
         gx.set_mmx(l, k, mval);
-        let dval = p7_flogsum(gx.xmx(l, P7G_E) + esc, gx.dmx(l, k + 1) + tsc(gm, P7P_DD, k));
+        let dval = p7_flogsum_with(lt, gx.xmx(l, P7G_E) + esc, gx.dmx(l, k + 1) + tsc(gm, P7P_DD, k));
         gx.set_dmx(l, k, dval);
         gx.set_imx(l, k, NEG_INF);
     }
@@ -952,12 +968,12 @@ pub fn p7_gbackward(dsq: &[u8], l: usize, gm: &GlocalProfile, gx: &mut P7Gmx) ->
         // B state (C 199-201)
         let mut b = gx.mmx(i + 1, 1) + tsc(gm, P7P_BM, 0) + rscx[1 * P7P_NR + P7P_MSC];
         for k in 2..=mm {
-            b = p7_flogsum(b, gx.mmx(i + 1, k) + tsc(gm, P7P_BM, k - 1) + rscx[k * P7P_NR + P7P_MSC]);
+            b = p7_flogsum_with(lt, b, gx.mmx(i + 1, k) + tsc(gm, P7P_BM, k - 1) + rscx[k * P7P_NR + P7P_MSC]);
         }
         gx.set_xmx(i, P7G_B, b);
 
         // J state (C 203-204)
-        let j = p7_flogsum(
+        let j = p7_flogsum_with(lt, 
             gx.xmx(i + 1, P7G_J) + gm.xsc[P7P_J][P7P_LOOP],
             gx.xmx(i, P7G_B) + gm.xsc[P7P_J][P7P_MOVE],
         );
@@ -968,14 +984,14 @@ pub fn p7_gbackward(dsq: &[u8], l: usize, gm: &GlocalProfile, gx: &mut P7Gmx) ->
         gx.set_xmx(i, P7G_C, c);
 
         // E state (C 208-209)
-        let e = p7_flogsum(
+        let e = p7_flogsum_with(lt, 
             gx.xmx(i, P7G_J) + gm.xsc[P7P_E][P7P_LOOP],
             gx.xmx(i, P7G_C) + gm.xsc[P7P_E][P7P_MOVE],
         );
         gx.set_xmx(i, P7G_E, e);
 
         // N state (C 211) — N<-N loop and N<-B move
-        let n = p7_flogsum(
+        let n = p7_flogsum_with(lt, 
             gx.xmx(i + 1, P7G_N) + gm.xsc[P7P_N][P7P_LOOP],
             gx.xmx(i, P7G_B) + gm.xsc[P7P_N][P7P_MOVE],
         );
@@ -989,12 +1005,12 @@ pub fn p7_gbackward(dsq: &[u8], l: usize, gm: &GlocalProfile, gx: &mut P7Gmx) ->
         for k in (1..mm).rev() {
             // M (C 219-222): FLogsum( FLogsum(MM+MSC, MI+ISC),
             //                         FLogsum(E+esc, MD) )  — keep exact nesting.
-            let mval = p7_flogsum(
-                p7_flogsum(
+            let mval = p7_flogsum_with(lt, 
+                p7_flogsum_with(lt, 
                     gx.mmx(i + 1, k + 1) + tsc(gm, P7P_MM, k) + rscx[(k + 1) * P7P_NR + P7P_MSC],
                     gx.imx(i + 1, k) + tsc(gm, P7P_MI, k) + rscx[k * P7P_NR + P7P_ISC],
                 ),
-                p7_flogsum(
+                p7_flogsum_with(lt, 
                     gx.xmx(i, P7G_E) + esc,
                     gx.dmx(i, k + 1) + tsc(gm, P7P_MD, k),
                 ),
@@ -1002,16 +1018,16 @@ pub fn p7_gbackward(dsq: &[u8], l: usize, gm: &GlocalProfile, gx: &mut P7Gmx) ->
             gx.set_mmx(i, k, mval);
 
             // I (C 224-225)
-            let ival = p7_flogsum(
+            let ival = p7_flogsum_with(lt, 
                 gx.mmx(i + 1, k + 1) + tsc(gm, P7P_IM, k) + rscx[(k + 1) * P7P_NR + P7P_MSC],
                 gx.imx(i + 1, k) + tsc(gm, P7P_II, k) + rscx[k * P7P_NR + P7P_ISC],
             );
             gx.set_imx(i, k, ival);
 
             // D (C 227-229): FLogsum( DM+MSC, FLogsum(DD, E+esc) ) — keep nesting.
-            let dval = p7_flogsum(
+            let dval = p7_flogsum_with(lt, 
                 gx.mmx(i + 1, k + 1) + tsc(gm, P7P_DM, k) + rscx[(k + 1) * P7P_NR + P7P_MSC],
-                p7_flogsum(
+                p7_flogsum_with(lt, 
                     gx.dmx(i, k + 1) + tsc(gm, P7P_DD, k),
                     gx.xmx(i, P7G_E) + esc,
                 ),
@@ -1029,13 +1045,13 @@ pub fn p7_gbackward(dsq: &[u8], l: usize, gm: &GlocalProfile, gx: &mut P7Gmx) ->
     let rsc1 = &gm.rsc[x1];
     let mut b0 = gx.mmx(1, 1) + tsc(gm, P7P_BM, 0) + rsc1[1 * P7P_NR + P7P_MSC];
     for k in 2..=mm {
-        b0 = p7_flogsum(b0, gx.mmx(1, k) + tsc(gm, P7P_BM, k - 1) + rsc1[k * P7P_NR + P7P_MSC]);
+        b0 = p7_flogsum_with(lt, b0, gx.mmx(1, k) + tsc(gm, P7P_BM, k - 1) + rsc1[k * P7P_NR + P7P_MSC]);
     }
     gx.set_xmx(0, P7G_B, b0);
     gx.set_xmx(0, P7G_J, NEG_INF);
     gx.set_xmx(0, P7G_C, NEG_INF);
     gx.set_xmx(0, P7G_E, NEG_INF);
-    let n0 = p7_flogsum(
+    let n0 = p7_flogsum_with(lt, 
         gx.xmx(1, P7G_N) + gm.xsc[P7P_N][P7P_LOOP],
         gx.xmx(0, P7G_B) + gm.xsc[P7P_N][P7P_MOVE],
     );
